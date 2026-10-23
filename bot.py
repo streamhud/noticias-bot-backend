@@ -124,7 +124,7 @@ async def ejecutar_bot():
             
             print(f"Escaneando feed: {feed_url} ({len(feed.entries)} noticias encontradas)")
 
-            for entry in feed.entries[:3]: # Procesar las 3 más recientes por feed
+            for entry in feed.entries[:3]:
                 fuente_url = entry.link
                 
                 res = supabase.from_('noticias').select('id').eq('fuente_url', fuente_url).execute()
@@ -134,9 +134,13 @@ async def ejecutar_bot():
                 titulo_orig = entry.title
                 resumen_orig = entry.get('summary', entry.get('description', ''))
                 
+                # Bloque limpio sin duplicados
                 data_ia = procesar_noticia_con_gemini(titulo_orig, resumen_orig)
                 if not data_ia:
                     continue
+
+                # Freno para no saturar la API gratuita de Gemini
+                time.sleep(5)
 
                 imagen_real, video_real = obtener_metadatos_html(fuente_url)
                 if not imagen_real:
@@ -163,6 +167,3 @@ async def ejecutar_bot():
                 print(f"✅ Publicada [{data_ia.get('categoria')}]: {data_ia['titulo']}")
         except Exception as e:
             print(f"Error en {feed_url}: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(ejecutar_bot())
