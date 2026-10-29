@@ -1,6 +1,7 @@
 import time
 import os
 import re
+import html
 import asyncio
 import json
 import feedparser
@@ -37,40 +38,65 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+def limpiar_texto(texto):
+    if not texto:
+        return ""
+    # Decodifica &nbsp;, &amp;, etc. y remueve tags HTML
+    texto_decodificado = html.unescape(texto)
+    texto_sin_html = re.sub(r'<[^>]+>', '', texto_decodificado)
+    return ' '.join(texto_sin_html.split()).strip()
+
 def obtener_metadatos_html(url):
     try:
-        respuesta = requests.get(url, headers=HEADERS, timeout=10)
-        html = respuesta.text
+        # Sigue las redirecciones automáticas para llegar al diario original (fuera de Google News)
+        respuesta = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
+        url_real = respuesta.url
+        html_contenido = respuesta.text
         
-        img_match = re.search(r'<meta\s+(?:property|name)="og:image"\s+content="([^"]+)"', html, re.IGNORECASE)
+        img_match = re.search(r'<meta\s+(?:property|name)="og:image"\s+content="([^"]+)"', html_contenido, re.IGNORECASE)
         imagen_url = img_match.group(1) if img_match else None
         
-        yt_match = re.search(r'(?:youtube\.com\/(?:embed\/|watch\?v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})', html)
+        # Si la imagen pertenece a Google News (logo GE), la descartamos para buscar una real
+        if imagen_url and any(dominio in imagen_url for dominio in ["googleusercontent.com", "gstatic.com", "google.com"]):
+            imagen_url = None
+
+        yt_match = re.search(r'(?:youtube\.com\/(?:embed\/|watch\?v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})', html_contenido)
         media_embed = None
         if yt_match:
             video_id = yt_match.group(1)
             media_embed = f'<iframe class="w-full aspect-video rounded-xl shadow-lg mb-4" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen></iframe>'
             
-        return imagen_url, media_embed
+        return imagen_url, media_embed, url_real
     except Exception as e:
         print(f"Error extrayendo HTML de {url}: {e}")
-        return None, None
+        return None, None, url
 
 def extraer_imagen_rss(entry):
+    url_img = None
     if 'media_content' in entry and len(entry.media_content) > 0:
-        return entry.media_content[0]['url']
-    if 'enclosures' in entry:
+        url_img = entry.media_content[0]['url']
+    elif 'enclosures' in entry:
         for enc in entry.enclosures:
             if 'image' in enc.get('type', ''):
-                return enc.get('href')
-    img_match = re.search(r'<img[^>]+src="([^">]+)"', entry.get('description', ''))
-    if img_match:
-        return img_match.group(1)
-    return None
+                url_img = enc.get('href')
+                break
+    if not url_img:
+        img_match = re.search(r'<img[^>]+src="([^">]+)"', entry.get('description', ''))
+        if img_match:
+            url_img = img_match.group(1)
+            
+    # Filtro anti-logo genérico de Google
+    if url_img and any(dominio in url_img for dominio in ["googleusercontent.com", "gstatic.com", "google.com"]):
+        return None
+        
+    return url_img
 
 async def generar_audio_mp3(texto_audio, filename="temp_audio.mp3"):
     try:
-        communicate = edge_tts.Communicate(texto_audio, VOZ_ARGENTINA)
+        texto_limpio_audio = limpiar_texto(texto_audio)
+        if not texto_limpio_audio:
+            return None
+        communicate = edge_tts.Communicate(texto_limpio_audio, VOZ_ARGENTINA)
         await communicate.save(filename)
         return filename
     except Exception as e:
@@ -91,35 +117,39 @@ def subir_audio_a_supabase(file_path, destination_name):
         return None
 
 def procesar_noticia_con_gemini(titulo, descripcion):
-    # Modelo oficial y disponible
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    prompt = f"""
-    Sos el editor principal de un portal de noticias automatizado.
-    Procesá la noticia y devolvé ÚNICAMENTE un objeto JSON válido.
-    
-    Campos requeridos:
-    - "titulo": Título claro y atractivo.
-    - "categoria": Elegí STRICTAMENTE una: ["Deportes", "Policiales", "Cultura", "Política", "Sociedad", "Economía", "Nacionales", "Mundo", "Alertas"].
-    - "puntos_clave": Viñetas en Markdown. Usa solo asteriscos simples (*). No uses saltos de línea con '\\n'.
-    - "texto_audio": Resumen ultra breve de máximo 2 oraciones para leer en 15 segundos.
+    titulo_limpio = limpiar_texto(titulo)
+    resumen_limpio = limpiar_texto(descripcion)
 
-    Título original: {titulo}
-    Texto: {descripcion}
-    """
     try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"""
+        Sos el editor principal de un portal de noticias automatizado.
+        Procesá la noticia y devolvé ÚNICAMENTE un objeto JSON válido.
+        
+        Campos requeridos:
+        - "titulo": Título claro y atractivo.
+        - "categoria": Elegí STRICTAMENTE una: ["Deportes", "Policiales", "Cultura", "Política", "Sociedad", "Economía", "Nacionales", "Mundo", "Alertas"].
+        - "puntos_clave": Viñetas en Markdown (*).
+        - "texto_audio": Resumen ultra breve de máximo 2 oraciones para voz.
+
+        Título original: {titulo_limpio}
+        Texto: {resumen_limpio}
+        """
         response = model.generate_content(prompt)
-        texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(texto_limpio)
+        texto_limpio_json = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(texto_limpio_json)
     except Exception as e:
-        print(f"⚠️ Error/Límite de API Gemini: {e}. Usando datos directos del RSS (Fallback)...")
-        resumen_limpio = re.sub(r'<[^>]+>', '', descripcion) if descripcion else titulo
-        puntos_fallback = f"* {resumen_limpio[:200]}..." if len(resumen_limpio) > 200 else f"* {resumen_limpio}"
+        print(f"⚠️ Aviso IA: {e}. Activando Fallback con audio y texto limpio...")
+        
+        puntos_fallback = f"* {resumen_limpio[:220]}..." if len(resumen_limpio) > 220 else f"* {resumen_limpio}"
+        # Se garantiza texto para audio de 15 segundos aunque falle Gemini
+        audio_fallback = resumen_limpio[:180] if resumen_limpio else titulo_limpio
 
         return {
-            "titulo": titulo,
+            "titulo": titulo_limpio,
             "categoria": "Informativa",
             "puntos_clave": puntos_fallback,
-            "texto_audio": None
+            "texto_audio": audio_fallback
         }
 
 async def ejecutar_bot():
@@ -142,9 +172,8 @@ async def ejecutar_bot():
                 resumen_orig = entry.get('summary', entry.get('description', ''))
                 
                 data_ia = procesar_noticia_con_gemini(titulo_orig, resumen_orig)
-                time.sleep(2)
 
-                imagen_real, video_real = obtener_metadatos_html(fuente_url)
+                imagen_real, video_real, fuente_url_real = obtener_metadatos_html(fuente_url)
                 if not imagen_real:
                     imagen_real = extraer_imagen_rss(entry)
 
@@ -161,7 +190,7 @@ async def ejecutar_bot():
                     "titulo": data_ia["titulo"],
                     "puntos_clave": data_ia["puntos_clave"],
                     "categoria": data_ia.get("categoria", "Informativa"),
-                    "fuente_url": fuente_url,
+                    "fuente_url": fuente_url_real,
                     "audio_url": audio_url,
                     "media_embed": video_real,
                     "imagen_url": imagen_real
@@ -169,6 +198,8 @@ async def ejecutar_bot():
 
                 supabase.from_('noticias').insert(nueva_noticia).execute()
                 print(f"✅ Publicada [{data_ia.get('categoria')}]: {data_ia['titulo']}")
+                time.sleep(2)
+
         except Exception as e:
             print(f"Error en feed {feed_url}: {e}")
 
