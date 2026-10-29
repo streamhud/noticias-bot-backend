@@ -19,22 +19,16 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Lista extendida de fuentes de noticias
 FEEDS = [
-    # Locales y Regionales (Chubut / Patagonia)
     "https://radio3cadenapatagonia.com.ar/feed/",
     "https://www.elchubut.com.ar/rss",
     "https://www.diariojornada.com.ar/rss/",
     "https://www.adnsur.com.ar/rss/feed.xml",
     "https://www.red43.com.ar/rss",
     "https://purapasion.com.ar/feed/",
-    
-    # Nacionales y Agencias Principales
-    "https://news.google.com/rss?hl=es-419&gl=AR&ceid=AR:es-419", # Google News Argentina
-    "https://www.infobae.com/feed/", # Infobae general
-    "https://tn.com.ar/feed/", # TN Todo Noticias
-    
-    # Alertas Especiales (Catástrofes, Atentados, Fúnebres) escaneadas en tiempo real
+    "https://news.google.com/rss?hl=es-419&gl=AR&ceid=AR:es-419",
+    "https://www.infobae.com/feed/",
+    "https://tn.com.ar/feed/",
     "https://news.google.com/rss/search?q=catástrofe+OR+sismo+OR+atentado+OR+falleció+OR+muerte+OR+alerta+urgente&hl=es-419&gl=AR&ceid=AR:es-419"
 ]
 
@@ -97,7 +91,7 @@ def subir_audio_a_supabase(file_path, destination_name):
         return None
 
 def procesar_noticia_con_gemini(titulo, descripcion):
-    # Usamos gemini-2.5-flash disponible en tu cuenta
+    # Modelo oficial y disponible
     model = genai.GenerativeModel("gemini-2.5-flash")
     prompt = f"""
     Sos el editor principal de un portal de noticias automatizado.
@@ -105,7 +99,7 @@ def procesar_noticia_con_gemini(titulo, descripcion):
     
     Campos requeridos:
     - "titulo": Título claro y atractivo.
-    - "categoria": Elegí STRICTAMENTE una: ["Deportes", "Policiales", "Cultura", "Política", "Sociedad", "Economía", "Nacionales", "Mundo", "Alertas"]. Si la noticia es sobre una catástrofe, muerte de un famoso o atentado, usa "Alertas".
+    - "categoria": Elegí STRICTAMENTE una: ["Deportes", "Policiales", "Cultura", "Política", "Sociedad", "Economía", "Nacionales", "Mundo", "Alertas"].
     - "puntos_clave": Viñetas en Markdown. Usa solo asteriscos simples (*). No uses saltos de línea con '\\n'.
     - "texto_audio": Resumen ultra breve de máximo 2 oraciones para leer en 15 segundos.
 
@@ -117,13 +111,10 @@ def procesar_noticia_con_gemini(titulo, descripcion):
         texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(texto_limpio)
     except Exception as e:
-        print(f"⚠️ Error/Límite en Gemini API: {e}. Activando modo de respaldo (Fallback)...")
-        
-        # Limpiar texto de HTML para el fallback
+        print(f"⚠️ Error/Límite de API Gemini: {e}. Usando datos directos del RSS (Fallback)...")
         resumen_limpio = re.sub(r'<[^>]+>', '', descripcion) if descripcion else titulo
         puntos_fallback = f"* {resumen_limpio[:200]}..." if len(resumen_limpio) > 200 else f"* {resumen_limpio}"
 
-        # MODO DE RESPALDO: Garantiza que la noticia SE PUBLIQUE IGUAL
         return {
             "titulo": titulo,
             "categoria": "Informativa",
@@ -132,31 +123,26 @@ def procesar_noticia_con_gemini(titulo, descripcion):
         }
 
 async def ejecutar_bot():
-    print("Iniciando escaneo masivo (Locales, Nacionales y Alertas)...")
+    print("Iniciando escaneo masivo...")
     for feed_url in FEEDS:
         try:
             respuesta = requests.get(feed_url, headers=HEADERS, timeout=15)
             feed = feedparser.parse(respuesta.content)
-            
-            print(f"\nEscaneando feed: {feed_url} ({len(feed.entries)} noticias encontradas)")
+            print(f"\nEscaneando feed: {feed_url} ({len(feed.entries)} noticias)")
 
-            for entry in feed.entries[:3]: # Procesar las 3 más recientes por feed
+            for entry in feed.entries[:3]:
                 fuente_url = entry.link
                 
-                # Verificación de duplicados en Supabase
                 res = supabase.from_('noticias').select('id').eq('fuente_url', fuente_url).execute()
                 if res.data and len(res.data) > 0:
-                    print(f"⏭️ Ya existe en BD: {entry.title[:40]}...")
+                    print(f"⏭️ Ya existe: {entry.title[:30]}...")
                     continue
 
                 titulo_orig = entry.title
                 resumen_orig = entry.get('summary', entry.get('description', ''))
                 
-                # Procesa con Gemini o activa el fallback automático
                 data_ia = procesar_noticia_con_gemini(titulo_orig, resumen_orig)
-
-                # Pausa para no saturar peticiones
-                time.sleep(3)
+                time.sleep(2)
 
                 imagen_real, video_real = obtener_metadatos_html(fuente_url)
                 if not imagen_real:
@@ -184,7 +170,7 @@ async def ejecutar_bot():
                 supabase.from_('noticias').insert(nueva_noticia).execute()
                 print(f"✅ Publicada [{data_ia.get('categoria')}]: {data_ia['titulo']}")
         except Exception as e:
-            print(f"Error procesando el feed {feed_url}: {e}")
+            print(f"Error en feed {feed_url}: {e}")
 
 if __name__ == "__main__":
     asyncio.run(ejecutar_bot())
