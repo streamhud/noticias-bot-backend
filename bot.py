@@ -33,7 +33,9 @@ FEEDS = [
     "https://news.google.com/rss/search?q=catástrofe+OR+sismo+OR+atentado+OR+falleció+OR+muerte+OR+alerta+urgente&hl=es-419&gl=AR&ceid=AR:es-419"
 ]
 
-VOZ_ARGENTINA = "es-AR-ElenaNeural"
+VOZ_PRINCIPAL = "es-AR-ElenaNeural"
+VOZ_RESPALDO = "es-AR-TomasNeural"
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
@@ -41,14 +43,12 @@ HEADERS = {
 def limpiar_texto(texto):
     if not texto:
         return ""
-    # Decodifica &nbsp;, &amp;, etc. y remueve tags HTML
     texto_decodificado = html.unescape(texto)
     texto_sin_html = re.sub(r'<[^>]+>', '', texto_decodificado)
     return ' '.join(texto_sin_html.split()).strip()
 
 def obtener_metadatos_html(url):
     try:
-        # Sigue las redirecciones automáticas para llegar al diario original (fuera de Google News)
         respuesta = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
         url_real = respuesta.url
         html_contenido = respuesta.text
@@ -56,7 +56,6 @@ def obtener_metadatos_html(url):
         img_match = re.search(r'<meta\s+(?:property|name)="og:image"\s+content="([^"]+)"', html_contenido, re.IGNORECASE)
         imagen_url = img_match.group(1) if img_match else None
         
-        # Si la imagen pertenece a Google News (logo GE), la descartamos para buscar una real
         if imagen_url and any(dominio in imagen_url for dominio in ["googleusercontent.com", "gstatic.com", "google.com"]):
             imagen_url = None
 
@@ -85,23 +84,32 @@ def extraer_imagen_rss(entry):
         if img_match:
             url_img = img_match.group(1)
             
-    # Filtro anti-logo genérico de Google
     if url_img and any(dominio in url_img for dominio in ["googleusercontent.com", "gstatic.com", "google.com"]):
         return None
         
     return url_img
 
 async def generar_audio_mp3(texto_audio, filename="temp_audio.mp3"):
+    texto_limpio_audio = limpiar_texto(texto_audio)
+    if not texto_limpio_audio:
+        return None
+
+    # Intento 1 con voz Elena
     try:
-        texto_limpio_audio = limpiar_texto(texto_audio)
-        if not texto_limpio_audio:
-            return None
-        communicate = edge_tts.Communicate(texto_limpio_audio, VOZ_ARGENTINA)
+        communicate = edge_tts.Communicate(texto_limpio_audio, VOZ_PRINCIPAL)
         await communicate.save(filename)
         return filename
-    except Exception as e:
-        print(f"Error generando TTS: {e}")
-        return None
+    except Exception as e1:
+        print(f"⚠️ Voz principal bloqueada ({e1}). Reintentando con voz Tomás...")
+        await asyncio.sleep(2)
+        # Intento 2 con voz Tomás
+        try:
+            communicate = edge_tts.Communicate(texto_limpio_audio, VOZ_RESPALDO)
+            await communicate.save(filename)
+            return filename
+        except Exception as e2:
+            print(f"❌ Error generando TTS en Edge: {e2}")
+            return None
 
 def subir_audio_a_supabase(file_path, destination_name):
     try:
@@ -121,7 +129,8 @@ def procesar_noticia_con_gemini(titulo, descripcion):
     resumen_limpio = limpiar_texto(descripcion)
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # Modelo oficial correcto
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""
         Sos el editor principal de un portal de noticias automatizado.
         Procesá la noticia y devolvé ÚNICAMENTE un objeto JSON válido.
@@ -139,10 +148,9 @@ def procesar_noticia_con_gemini(titulo, descripcion):
         texto_limpio_json = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(texto_limpio_json)
     except Exception as e:
-        print(f"⚠️ Aviso IA: {e}. Activando Fallback con audio y texto limpio...")
+        print(f"⚠️ Aviso Gemini API ({e}). Usando Fallback directo...")
         
         puntos_fallback = f"* {resumen_limpio[:220]}..." if len(resumen_limpio) > 220 else f"* {resumen_limpio}"
-        # Se garantiza texto para audio de 15 segundos aunque falle Gemini
         audio_fallback = resumen_limpio[:180] if resumen_limpio else titulo_limpio
 
         return {
@@ -198,7 +206,9 @@ async def ejecutar_bot():
 
                 supabase.from_('noticias').insert(nueva_noticia).execute()
                 print(f"✅ Publicada [{data_ia.get('categoria')}]: {data_ia['titulo']}")
-                time.sleep(2)
+                
+                # Pausa para evitar rate limits
+                await asyncio.sleep(3)
 
         except Exception as e:
             print(f"Error en feed {feed_url}: {e}")
