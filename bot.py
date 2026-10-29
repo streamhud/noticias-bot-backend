@@ -93,7 +93,7 @@ def subir_audio_a_supabase(file_path, destination_name):
         return None
 
 def procesar_noticia_con_gemini(titulo, descripcion):
-    model = genai.GenerativeModel("gemini-3.8-flash")
+    model = genai.GenerativeModel("gemini-1.5-flash")
     prompt = f"""
     Sos el editor principal de un portal de noticias automatizado.
     Procesá la noticia y devolvé ÚNICAMENTE un objeto JSON válido.
