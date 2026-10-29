@@ -75,9 +75,13 @@ def extraer_imagen_rss(entry):
     return None
 
 async def generar_audio_mp3(texto_audio, filename="temp_audio.mp3"):
-    communicate = edge_tts.Communicate(texto_audio, VOZ_ARGENTINA)
-    await communicate.save(filename)
-    return filename
+    try:
+        communicate = edge_tts.Communicate(texto_audio, VOZ_ARGENTINA)
+        await communicate.save(filename)
+        return filename
+    except Exception as e:
+        print(f"Error generando TTS: {e}")
+        return None
 
 def subir_audio_a_supabase(file_path, destination_name):
     try:
@@ -93,7 +97,8 @@ def subir_audio_a_supabase(file_path, destination_name):
         return None
 
 def procesar_noticia_con_gemini(titulo, descripcion):
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # Usamos gemini-2.5-flash disponible en tu cuenta
+    model = genai.GenerativeModel("gemini-2.5-flash")
     prompt = f"""
     Sos el editor principal de un portal de noticias automatizado.
     Procesá la noticia y devolvé ÚNICAMENTE un objeto JSON válido.
@@ -112,8 +117,19 @@ def procesar_noticia_con_gemini(titulo, descripcion):
         texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(texto_limpio)
     except Exception as e:
-        print(f"Error de IA: {e}")
-        return None
+        print(f"⚠️ Error/Límite en Gemini API: {e}. Activando modo de respaldo (Fallback)...")
+        
+        # Limpiar texto de HTML para el fallback
+        resumen_limpio = re.sub(r'<[^>]+>', '', descripcion) if descripcion else titulo
+        puntos_fallback = f"* {resumen_limpio[:200]}..." if len(resumen_limpio) > 200 else f"* {resumen_limpio}"
+
+        # MODO DE RESPALDO: Garantiza que la noticia SE PUBLIQUE IGUAL
+        return {
+            "titulo": titulo,
+            "categoria": "Informativa",
+            "puntos_clave": puntos_fallback,
+            "texto_audio": None
+        }
 
 async def ejecutar_bot():
     print("Iniciando escaneo masivo (Locales, Nacionales y Alertas)...")
@@ -122,24 +138,25 @@ async def ejecutar_bot():
             respuesta = requests.get(feed_url, headers=HEADERS, timeout=15)
             feed = feedparser.parse(respuesta.content)
             
-            print(f"Escaneando feed: {feed_url} ({len(feed.entries)} noticias encontradas)")
+            print(f"\nEscaneando feed: {feed_url} ({len(feed.entries)} noticias encontradas)")
 
             for entry in feed.entries[:3]: # Procesar las 3 más recientes por feed
                 fuente_url = entry.link
                 
+                # Verificación de duplicados en Supabase
                 res = supabase.from_('noticias').select('id').eq('fuente_url', fuente_url).execute()
                 if res.data and len(res.data) > 0:
+                    print(f"⏭️ Ya existe en BD: {entry.title[:40]}...")
                     continue
 
                 titulo_orig = entry.title
                 resumen_orig = entry.get('summary', entry.get('description', ''))
                 
+                # Procesa con Gemini o activa el fallback automático
                 data_ia = procesar_noticia_con_gemini(titulo_orig, resumen_orig)
-                if not data_ia:
-                    continue
 
-                # Freno para no saturar la API gratuita de Gemini
-                time.sleep(5)
+                # Pausa para no saturar peticiones
+                time.sleep(3)
 
                 imagen_real, video_real = obtener_metadatos_html(fuente_url)
                 if not imagen_real:
@@ -148,9 +165,11 @@ async def ejecutar_bot():
                 audio_url = None
                 if data_ia.get("texto_audio"):
                     temp_file = f"audio_{abs(hash(fuente_url))}.mp3"
-                    await generar_audio_mp3(data_ia["texto_audio"], temp_file)
-                    audio_url = subir_audio_a_supabase(temp_file, f"noticia_{abs(hash(fuente_url))}.mp3")
-                    if os.path.exists(temp_file): os.remove(temp_file)
+                    audio_generado = await generar_audio_mp3(data_ia["texto_audio"], temp_file)
+                    if audio_generado:
+                        audio_url = subir_audio_a_supabase(temp_file, f"noticia_{abs(hash(fuente_url))}.mp3")
+                        if os.path.exists(temp_file): 
+                            os.remove(temp_file)
 
                 nueva_noticia = {
                     "titulo": data_ia["titulo"],
@@ -165,7 +184,7 @@ async def ejecutar_bot():
                 supabase.from_('noticias').insert(nueva_noticia).execute()
                 print(f"✅ Publicada [{data_ia.get('categoria')}]: {data_ia['titulo']}")
         except Exception as e:
-            print(f"Error en {feed_url}: {e}")
+            print(f"Error procesando el feed {feed_url}: {e}")
 
 if __name__ == "__main__":
     asyncio.run(ejecutar_bot())
