@@ -2,11 +2,10 @@ import time
 import os
 import re
 import html
-import asyncio
 import json
 import feedparser
 import requests
-import edge_tts
+from gtts import gTTS
 from dotenv import load_dotenv
 import google.generativeai as genai
 from supabase import create_client, Client
@@ -32,9 +31,6 @@ FEEDS = [
     "https://tn.com.ar/feed/",
     "https://news.google.com/rss/search?q=catástrofe+OR+sismo+OR+atentado+OR+falleció+OR+muerte+OR+alerta+urgente&hl=es-419&gl=AR&ceid=AR:es-419"
 ]
-
-VOZ_PRINCIPAL = "es-AR-ElenaNeural"
-VOZ_RESPALDO = "es-AR-TomasNeural"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -89,27 +85,19 @@ def extraer_imagen_rss(entry):
         
     return url_img
 
-async def generar_audio_mp3(texto_audio, filename="temp_audio.mp3"):
+def generar_audio_mp3(texto_audio, filename="temp_audio.mp3"):
     texto_limpio_audio = limpiar_texto(texto_audio)
     if not texto_limpio_audio:
         return None
 
-    # Intento 1 con voz Elena
     try:
-        communicate = edge_tts.Communicate(texto_limpio_audio, VOZ_PRINCIPAL)
-        await communicate.save(filename)
+        # Voz en español con acento argentino vía gTTS
+        tts = gTTS(text=texto_limpio_audio, lang='es', tld='com.ar')
+        tts.save(filename)
         return filename
-    except Exception as e1:
-        print(f"⚠️ Voz principal bloqueada ({e1}). Reintentando con voz Tomás...")
-        await asyncio.sleep(2)
-        # Intento 2 con voz Tomás
-        try:
-            communicate = edge_tts.Communicate(texto_limpio_audio, VOZ_RESPALDO)
-            await communicate.save(filename)
-            return filename
-        except Exception as e2:
-            print(f"❌ Error generando TTS en Edge: {e2}")
-            return None
+    except Exception as e:
+        print(f"❌ Error generando TTS con gTTS: {e}")
+        return None
 
 def subir_audio_a_supabase(file_path, destination_name):
     try:
@@ -129,8 +117,7 @@ def procesar_noticia_con_gemini(titulo, descripcion):
     resumen_limpio = limpiar_texto(descripcion)
 
     try:
-        # Modelo oficial correcto
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-3.8-flash")
         prompt = f"""
         Sos el editor principal de un portal de noticias automatizado.
         Procesá la noticia y devolvé ÚNICAMENTE un objeto JSON válido.
@@ -160,7 +147,7 @@ def procesar_noticia_con_gemini(titulo, descripcion):
             "texto_audio": audio_fallback
         }
 
-async def ejecutar_bot():
+def ejecutar_bot():
     print("Iniciando escaneo masivo...")
     for feed_url in FEEDS:
         try:
@@ -188,7 +175,7 @@ async def ejecutar_bot():
                 audio_url = None
                 if data_ia.get("texto_audio"):
                     temp_file = f"audio_{abs(hash(fuente_url))}.mp3"
-                    audio_generado = await generar_audio_mp3(data_ia["texto_audio"], temp_file)
+                    audio_generado = generar_audio_mp3(data_ia["texto_audio"], temp_file)
                     if audio_generado:
                         audio_url = subir_audio_a_supabase(temp_file, f"noticia_{abs(hash(fuente_url))}.mp3")
                         if os.path.exists(temp_file): 
@@ -206,12 +193,10 @@ async def ejecutar_bot():
 
                 supabase.from_('noticias').insert(nueva_noticia).execute()
                 print(f"✅ Publicada [{data_ia.get('categoria')}]: {data_ia['titulo']}")
-                
-                # Pausa para evitar rate limits
-                await asyncio.sleep(3)
+                time.sleep(2)
 
         except Exception as e:
             print(f"Error en feed {feed_url}: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(ejecutar_bot())
+    ejecutar_bot()
